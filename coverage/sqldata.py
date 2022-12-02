@@ -17,6 +17,7 @@ import sqlite3
 import sys
 import textwrap
 import threading
+import weakref
 import zlib
 
 from coverage.debug import NoDebugging, AutoReprMixin, clipped_repr
@@ -212,7 +213,6 @@ class CoverageData(AutoReprMixin):
         self._file_map = {}
         # Maps thread ids to SqliteDb objects.
         self._dbs = {}
-        self._pid = os.getpid()
         # Synchronize the operations used during collection.
         self._lock = threading.RLock()
 
@@ -225,6 +225,21 @@ class CoverageData(AutoReprMixin):
         self._current_context = None
         self._current_context_id = None
         self._query_context_ids = None
+
+        if hasattr(os, "fork"):
+            os.register_at_fork(after_in_child=functools.partial(self._at_fork, weakref.ref(self)))
+
+    @staticmethod
+    def _at_fork(self_ref):
+        """A hook run in new child processes after a fork."""
+        self = self_ref()
+        if self is None:
+            return
+
+        # Looks like we forked! Have to start a new data file.
+        self._lock = threading.Lock()
+        self._reset()
+        self._choose_filename()
 
     def _locked(method):            # pylint: disable=no-self-argument
         """A decorator for methods that should hold self._lock."""
@@ -802,11 +817,6 @@ class CoverageData(AutoReprMixin):
 
     def _start_using(self):
         """Call this before using the database at all."""
-        if self._pid != os.getpid():
-            # Looks like we forked! Have to start a new data file.
-            self._reset()
-            self._choose_filename()
-            self._pid = os.getpid()
         if not self._have_used:
             self.erase()
         self._have_used = True
